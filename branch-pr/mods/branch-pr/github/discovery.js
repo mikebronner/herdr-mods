@@ -1,8 +1,8 @@
 // Which repository and PR this copy is looking at, following the space, its
 // checkout and its branch. A token per kind of read lets an old answer finish
 // without replacing what's on screen after navigation.
-import { exec } from "herdr";
-import { repositoryFromRemote, searchQuery } from "./model.js";
+import { exec, layout } from "herdr";
+import { panelShown, repositoryFromRemote, searchQuery } from "./model.js";
 
 // Hopping through tabs settles here before any Git or GitHub read starts.
 const SETTLE_MS = 300;
@@ -80,6 +80,7 @@ export const discoveryMethods = {
       remote: this.remote,
       repo: this.repo,
       pr: this.pr,
+      error: this.error,
       lastUpdated: this.lastUpdated,
     });
     if (this.snapshots.size > SNAPSHOT_LIMIT)
@@ -105,17 +106,24 @@ export const discoveryMethods = {
       this.total = cached?.total ?? null;
       this.listLoaded = Boolean(cached);
     }
+    // Its files are read again once the space settles, through openPR.
     if (saved.pr) this.adoptPR(saved.pr, saved.pr.repository);
+    this.error = saved.error ?? null;
     this.lastUpdated = saved.lastUpdated;
   },
 
   // Passing through a space costs nothing; refresh() takes over a pending one.
+  // A hidden panel reads nothing, and is due at once when it shows.
   settleRefresh(cx) {
     const token = ++this.settleToken;
     this.settling = true;
     cx.timer.after(SETTLE_MS, (cx) => {
       if (token !== this.settleToken) return;
-      this.refresh(cx);
+      if (panelShown(layout(), "branch-pr")) this.refresh(cx);
+      else {
+        this.settling = false;
+        this.refreshed = 0;
+      }
       cx.notify();
     });
   },
@@ -208,7 +216,8 @@ export const discoveryMethods = {
           (a, b) =>
             (b.state === "OPEN") - (a.state === "OPEN") || b.updatedAt.localeCompare(a.updatedAt),
         );
-        this.branchKnown = true;
+        // Every remote failing is not an answer, so it isn't kept for coming back.
+        if (!failures.length || failures.length < results.length) this.branchKnown = true;
         if (failures.length) {
           this.notice = `${failures.length} remote repositories could not be checked.`;
           if (!this.branchPRs.length) this.error = failures[0].reason.message;

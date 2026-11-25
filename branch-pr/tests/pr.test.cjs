@@ -319,6 +319,7 @@ test('a space change while the branch\'s only PR loads does not leave it loading
   h.mod.openSoleBranchPR(h.cx);
   assert.equal(h.mod.opening.number, 1);
   h.mod.api = async (r) => { if (r.action === 'branch') return { items: [card] }; if (r.action === 'detail') return PR({ number: 1 }); return { items: [], cursors: {} }; };
+  h.live.layout = { type: 'stack', active: 'pulls', children: [{ id: 'pulls', content: { mod: 'branch-pr' } }] };
   h.mod.changeSpace({ id: 'space', folder: '/repo', branch: 'fix' }, 'space:fix', h.cx);
   h.fireAfter();
   finish(); await h.flush();
@@ -326,6 +327,8 @@ test('a space change while the branch\'s only PR loads does not leave it loading
   assert.equal(h.mod.opening, null);
   assert.doesNotMatch(strings(h.mod.render()), /Loading #1…/);
 });
+
+const SHOWN = { type: 'stack', active: 'pulls', children: [{ id: 'pulls', content: { mod: 'branch-pr' } }] };
 
 // Each folder is its own repository, owner/<folder>, on branch fix, with one PR.
 function spacesHarness() {
@@ -336,15 +339,19 @@ function spacesHarness() {
     const answer = (stdout) => ({ code: 0, stdout, stderr: '' });
     if (line.includes('symbolic-ref')) return answer('fix\n');
     if (line.includes('remote get-url origin')) return answer(`git@github.com:owner${cwd}.git`);
-    if (line === 'git remote') return answer('origin\n');
+    if (line.includes('remote get-url upstream') && h.remotes.includes('upstream')) return answer(`git@github.com:up${cwd}.git`);
+    if (line === 'git remote') return answer(h.remotes);
     return { code: 1, stdout: '', stderr: '' };
   } });
+  h.live.layout = SHOWN;
+  h.remotes = 'origin\n';
   h.title = 'Only';
   h.reads = [];
   h.mod.api = async (r, sp = h.mod.sp) => {
     h.reads.push(sp.folder);
     if (r.action === 'branch') return { items: [{ id: r.repo, number: 1, title: h.title, state: 'OPEN', updatedAt: '', repository: r.repo, author: { login: 'ann' }, headRepository: { nameWithOwner: r.repo } }] };
     if (r.action === 'detail') return PR({ id: `${r.repo}#${r.number}`, number: r.number, title: h.title });
+    if (r.action === 'files') return [[{ filename: `${r.repo.split('/')[1]}.go`, additions: 1, deletions: 0 }]];
     return { items: [], cursors: {}, total: 0 };
   };
   h.go = (folder, branch = 'fix') => h.mod.changeSpace({ id: folder, folder, branch }, `local:${folder}:${folder}:${branch}`, h.cx);
@@ -410,6 +417,71 @@ test('a branch load left behind starts no more Git or GitHub reads', async () =>
   h.go('/a');
   same(h.mod.branchPRs, []);
   assert.match(strings(h.mod.render()), /Loading this branch's PRs/, 'a load that never finished is not kept');
+});
+
+test('coming back to a PR on its Files tab never shows the files of the PR seen meanwhile', async () => {
+  const h = spacesHarness();
+  h.go('/a'); await h.settle();
+  h.mod.selectSection('files', h.cx); await h.flush();
+  assert.match(strings(h.mod.render()), /a\.go/);
+  h.go('/b'); await h.settle();
+  h.mod.selectSection('files', h.cx); await h.flush();
+  assert.match(strings(h.mod.render()), /b\.go/);
+  h.go('/a');
+  assert.equal(h.mod.section, 'files');
+  const back = strings(h.mod.render());
+  assert.doesNotMatch(back, /b\.go/, 'not the other PR\'s files');
+  assert.match(back, /Loading files…/);
+  await h.settle();
+  assert.match(strings(h.mod.render()), /a\.go/, 'its own files are read again once it settles');
+});
+
+test('a branch check where every remote failed is not kept as "no PRs"', async () => {
+  const h = spacesHarness();
+  const api = h.mod.api;
+  h.mod.api = async (r, sp) => (r.action === 'branch' ? Promise.reject(new Error('API rate limit exceeded')) : api(r, sp));
+  h.go('/a'); await h.settle();
+  assert.equal(h.mod.branchKnown, false);
+  assert.match(strings(h.mod.render()), /API rate limit exceeded/);
+  h.go('/b'); await h.settle();
+  h.mod.api = () => new Promise(() => {});
+  h.go('/a');
+  assert.equal(h.mod.snapshots.has(h.mod.spaceKey), false);
+  const back = strings(h.mod.render());
+  assert.doesNotMatch(back, /No pull requests from/);
+  assert.match(back, /Loading this branch's PRs/);
+});
+
+test('when one remote fails, coming back keeps its error with the empty list', async () => {
+  const h = spacesHarness();
+  h.remotes = 'origin\nupstream\n';
+  h.mod.api = async (r) => {
+    if (r.action === 'branch') return r.repo.startsWith('up/') ? Promise.reject(new Error('Not Found')) : { items: [] };
+    return { items: [], cursors: {}, total: 0 };
+  };
+  h.go('/a'); await h.settle();
+  assert.equal(h.mod.branchKnown, true);
+  assert.equal(h.mod.error, 'Not Found');
+  h.go('/b'); await h.settle();
+  h.mod.api = () => new Promise(() => {});
+  h.go('/a');
+  assert.equal(h.mod.error, 'Not Found');
+  assert.match(strings(h.mod.render()), /Not Found/);
+});
+
+test('a space change while the panel is hidden reads nothing, and catches up when it shows', async () => {
+  const h = spacesHarness();
+  h.go('/a'); await h.settle();
+  h.live.layout = { type: 'stack', active: 'files', children: [{ id: 'files', content: { mod: 'files' } }, { id: 'pulls', content: { mod: 'branch-pr' } }] };
+  h.execCalls.length = 0; h.reads.length = 0;
+  h.go('/b'); await h.settle();
+  same(h.execCalls, []);
+  same(h.reads, []);
+  assert.equal(h.mod.settling, false);
+  h.live.spaces = [{ id: '/b', active: true, folder: '/b', branch: 'fix', tabs: [] }];
+  h.live.layout = SHOWN;
+  h.tick(); await h.flush();
+  same([...new Set(h.reads)], ['/b']);
 });
 
 test('what a space showed never shows under another space, folder or branch', async () => {
