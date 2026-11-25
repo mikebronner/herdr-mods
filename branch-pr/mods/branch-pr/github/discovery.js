@@ -4,8 +4,15 @@
 import { exec } from "herdr";
 import { repositoryFromRemote, searchQuery } from "./model.js";
 
+// Hopping through tabs settles here before any Git or GitHub read starts.
+const SETTLE_MS = 300;
+// How many spaces, folders and branches keep what they last showed.
+const SNAPSHOT_LIMIT = 20;
+
 export const discoveryMethods = {
   changeSpace(sp, key, cx) {
+    const first = !this.spaceKey;
+    this.keepSnapshot();
     this.leavePR();
     this.rememberView();
     this.browseKey = null;
@@ -21,6 +28,8 @@ export const discoveryMethods = {
     this.repoToken++;
     this.branchToken++;
     this.searchToken++;
+    this.settleToken++;
+    this.settling = false;
     this.repoLoading = false;
     this.branchLoading = false;
     this.searchPending = false;
@@ -28,6 +37,7 @@ export const discoveryMethods = {
     this.serverSearch = searchQuery(this.search.value());
     this.branch = null;
     this.branchPRs = [];
+    this.branchKnown = false;
     this.listLoaded = false;
     this.branchLoaded = false;
     this.contextSince = Date.now();
@@ -53,7 +63,61 @@ export const discoveryMethods = {
       cx.notify();
       return;
     }
-    this.refresh(cx);
+    this.restoreSnapshot();
+    if (first) this.refresh(cx);
+    else this.settleRefresh(cx);
+    cx.notify();
+  },
+
+  // Only once the branch has been read, so a half-done load never passes for an answer.
+  keepSnapshot() {
+    if (!this.spaceKey || !this.branchKnown) return;
+    this.snapshots.delete(this.spaceKey);
+    this.snapshots.set(this.spaceKey, {
+      branch: this.branch,
+      branchPRs: this.branchPRs,
+      remotes: this.remotes,
+      remote: this.remote,
+      repo: this.repo,
+      pr: this.pr,
+      lastUpdated: this.lastUpdated,
+    });
+    if (this.snapshots.size > SNAPSHOT_LIMIT)
+      this.snapshots.delete(this.snapshots.keys().next().value);
+  },
+
+  // Keyed by the whole context, so one space's answer never shows in another.
+  restoreSnapshot() {
+    const saved = this.snapshots.get(this.spaceKey);
+    if (!saved) return;
+    this.branch = saved.branch;
+    this.branchPRs = saved.branchPRs;
+    this.branchKnown = true;
+    this.branchLoaded = true;
+    this.remotes = saved.remotes;
+    this.remote = saved.remote;
+    if (saved.repo) {
+      this.repo = saved.repo;
+      this.restoreView(saved.repo);
+      const cached = this.cache[this.listKey()];
+      this.items = cached?.items ?? [];
+      this.cursors = cached?.cursors ?? {};
+      this.total = cached?.total ?? null;
+      this.listLoaded = Boolean(cached);
+    }
+    if (saved.pr) this.adoptPR(saved.pr, saved.pr.repository);
+    this.lastUpdated = saved.lastUpdated;
+  },
+
+  // Passing through a space costs nothing; refresh() takes over a pending one.
+  settleRefresh(cx) {
+    const token = ++this.settleToken;
+    this.settling = true;
+    cx.timer.after(SETTLE_MS, (cx) => {
+      if (token !== this.settleToken) return;
+      this.refresh(cx);
+      cx.notify();
+    });
   },
 
   async detectRepo(sp) {
@@ -105,6 +169,7 @@ export const discoveryMethods = {
         this.branch = result.code === 0 ? result.stdout.trim() : "";
         if (!this.branch) {
           this.branchPRs = [];
+          this.branchKnown = true;
           return;
         }
         const binding = await exec(
@@ -112,6 +177,8 @@ export const discoveryMethods = {
           ["config", "--get", `branch.${this.branch}.herdr-pr`],
           options,
         );
+        // A load left behind stops here rather than start more processes.
+        if (token !== this.branchToken || key !== this.spaceKey) return;
         const association = /^([\w.-]+\/[\w.-]+)#([1-9][0-9]*)$/.exec(binding.stdout?.trim() ?? "");
         if (association) {
           const linked = await this.api(
@@ -120,9 +187,11 @@ export const discoveryMethods = {
           );
           if (token !== this.branchToken || key !== this.spaceKey) return;
           this.branchPRs = [{ ...linked, repository: association[1] }];
+          this.branchKnown = true;
           return;
         }
         const remotes = await this.discoverRemotes(sp);
+        if (token !== this.branchToken || key !== this.spaceKey) return;
         const repositories = [...new Set(remotes.map((r) => r.repo).filter(Boolean))];
         const results = await Promise.allSettled(
           repositories.map((repo) => this.api({ action: "branch", repo, branch: this.branch }, sp)),
@@ -139,6 +208,7 @@ export const discoveryMethods = {
           (a, b) =>
             (b.state === "OPEN") - (a.state === "OPEN") || b.updatedAt.localeCompare(a.updatedAt),
         );
+        this.branchKnown = true;
         if (failures.length) {
           this.notice = `${failures.length} remote repositories could not be checked.`;
           if (!this.branchPRs.length) this.error = failures[0].reason.message;

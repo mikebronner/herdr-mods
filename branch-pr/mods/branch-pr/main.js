@@ -79,11 +79,13 @@ class PullRequests extends View {
     this.items = [];
     this.cursors = {};
     this.cache = {};
+    this.snapshots = new Map();
     this.listToken = 0;
     this.detailToken = 0;
     this.repoToken = 0;
     this.branchToken = 0;
     this.searchToken = 0;
+    this.settleToken = 0;
 
     this.menuFocus = cx.focus_handle();
     this.remoteTrigger = cx.focus_handle();
@@ -215,7 +217,8 @@ class PullRequests extends View {
         Date.now() - (this.refreshed ?? 0) >
         duration(this.settings.refresh.every, REFRESH_INTERVAL_MS);
       // Coming back to a hidden panel makes it due at once, if it's been a while.
-      if (!this.busy && !this.mutating && due && panelShown(layout(), "branch-pr"))
+      // A space still settling starts its own reads.
+      if (!this.busy && !this.mutating && !this.settling && due && panelShown(layout(), "branch-pr"))
         this.refresh(cx);
     });
   }
