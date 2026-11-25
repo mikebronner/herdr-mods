@@ -310,6 +310,22 @@ test('a branch with one PR shows it straight away, with no back button', async (
   assert.ok(find(h.mod.render(), 'pr-back'));
 });
 
+test('a space change while the branch\'s only PR loads does not leave it loading forever', async () => {
+  const card = { id: 'a', number: 1, title: 'Only', state: 'OPEN', updatedAt: '', repository: 'owner/repo', author: { login: 'ann' }, headRepository: { nameWithOwner: 'owner/repo' } };
+  const h = harness({ exec: git([['symbolic-ref', 'fix\n'], ['remote get-url origin', 'git@github.com:owner/repo.git'], ['git remote', 'origin\n']]) });
+  let finish;
+  h.mod.api = (r) => (r.action === 'detail' ? new Promise((done) => { finish = () => done(PR({ number: 1 })); }) : Promise.resolve({ items: [], cursors: {} }));
+  h.mod.branchPRs = [card];
+  h.mod.openSoleBranchPR(h.cx);
+  assert.equal(h.mod.opening.number, 1);
+  h.mod.api = async (r) => { if (r.action === 'branch') return { items: [card] }; if (r.action === 'detail') return PR({ number: 1 }); return { items: [], cursors: {} }; };
+  h.mod.changeSpace({ id: 'space', folder: '/repo', branch: 'fix' }, 'space:fix', h.cx);
+  finish(); await h.flush();
+  assert.equal(h.mod.pr?.number, 1, 'the new branch load opens its PR');
+  assert.equal(h.mod.opening, null);
+  assert.doesNotMatch(strings(h.mod.render()), /Loading #1…/);
+});
+
 test('tabs show a spinner, not a number, and can\'t be clicked until first loaded', async () => {
   const h = harness();
   h.mod.branchLoaded = false; h.mod.listLoaded = false;

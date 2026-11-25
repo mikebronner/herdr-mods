@@ -40,6 +40,7 @@ export const discoveryMethods = {
     this.error = null;
     this.loading = false;
     this.detailLoading = false;
+    this.opening = null;
     this.worktreeForm = null;
     this.composer = null;
     this.draftKey = null;
